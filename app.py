@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 import os
 import speech_recognition as sr
 import io
+from gtts import gTTS
 
 # Load environment variables
 load_dotenv()
@@ -16,6 +17,28 @@ LANGUAGES = {
     "English": "en-US",
     "Chinese (Mandarin)": "zh-CN"
 }
+
+# Function to generate TTS audio
+def generate_tts_audio(text, language_code="en", max_retries=2):
+    """Generate text-to-speech audio using gTTS with retry mechanism"""
+    # Truncate very long messages for TTS performance
+    if len(text) > 1000:
+        text = text[:1000] + "..."
+
+    for attempt in range(max_retries):
+        try:
+            # Create gTTS object
+            tts = gTTS(text=text, lang=language_code, slow=False)
+            # Save to bytes buffer
+            audio_buffer = io.BytesIO()
+            tts.write_to_fp(audio_buffer)
+            audio_buffer.seek(0)
+            return audio_buffer.getvalue()
+        except Exception as e:
+            if attempt == max_retries - 1:
+                return None
+            continue
+    return None
 
 # Function to transcribe audio to text
 def transcribe_audio(audio_file, language_code="en-US"):
@@ -100,6 +123,16 @@ if "voice_text" not in st.session_state:
 if "language" not in st.session_state:
     st.session_state.language = "English"
 
+if "tts_audio" not in st.session_state:
+    st.session_state.tts_audio = {}
+
+if "processing" not in st.session_state:
+    st.session_state.processing = False
+
+if "last_audio_bytes" not in st.session_state:
+    st.session_state.last_audio_bytes = None
+
+
 # Sidebar
 with st.sidebar:
     st.title("🤖 AI Chatbot")
@@ -117,6 +150,7 @@ with st.sidebar:
     if selected_personality != st.session_state.personality:
         st.session_state.personality = selected_personality
         st.session_state.messages = []  # Clear chat history on personality change
+        st.session_state.tts_audio = {}  # Clear TTS audio on personality change
         st.rerun()
 
     # Display personality info
@@ -126,50 +160,130 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Language selector
-    st.subheader("🌐 Language")
-    selected_language = st.selectbox(
-        "Select voice input language:",
-        options=list(LANGUAGES.keys()),
-        index=list(LANGUAGES.keys()).index(st.session_state.language)
-    )
+    # Language selector in expander
+    with st.expander("🌐 Language Settings", expanded=False):
+        selected_language = st.selectbox(
+            "Select language:",
+            options=list(LANGUAGES.keys()),
+            index=list(LANGUAGES.keys()).index(st.session_state.language),
+            help="Choose language for voice input and AI responses"
+        )
 
-    # Update language if changed
-    if selected_language != st.session_state.language:
-        st.session_state.language = selected_language
-        st.rerun()
+        # Update language if changed
+        if selected_language != st.session_state.language:
+            st.session_state.language = selected_language
+            st.rerun()
+
+        st.info("💡 AI will respond in the selected language")
 
     st.markdown("---")
-    st.subheader("About")
-    st.markdown("""
-    This chatbot uses Google's Gemini AI to provide intelligent responses.
 
-    **Powered by:**
-    - Streamlit
-    - Google Gemini API
-    - Model: gemini-2.5-flash
-    """)
+    # About section in expander
+    with st.expander("ℹ️ About", expanded=False):
+        st.markdown("""
+        This chatbot uses Google's Gemini AI to provide intelligent responses with voice capabilities.
 
-    if st.button("Clear Chat History"):
+        **Features:**
+        - 🎤 Voice input & output
+        - 🌐 Multi-language support
+        - 🤖 Multiple AI personalities
+        - 💬 Text & voice chat
+
+        **Powered by:**
+        - Streamlit
+        - Google Gemini API (gemini-2.5-flash)
+        - Google TTS & Speech Recognition
+        """)
+
+    st.markdown("---")
+
+    # Clear history button with confirmation
+    if st.button("🗑️ Clear Chat History", type="secondary", use_container_width=True, help="Clear all messages and audio"):
         st.session_state.messages = []
+        st.session_state.tts_audio = {}
         st.rerun()
 
 # Main chat interface
 st.title(f"{PERSONALITIES[st.session_state.personality]['icon']} Chat with {st.session_state.personality}")
 
-# Display chat messages
-for message in st.session_state.messages:
+# Show welcome message if no messages yet
+if len(st.session_state.messages) == 0:
+    st.info(f"""
+    👋 **Welcome!** I'm your {st.session_state.personality}.
+
+    **Get started:**
+    - 🎤 Use voice input below to speak your message
+    - ⌨️ Or type your message in the text box
+    - 🔊 I'll respond with both text and audio
+
+    Current language: **{st.session_state.language}**
+    """)
+    st.markdown("---")
+
+# Display chat messages with TTS audio
+for idx, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
+    # Add TTS audio player for assistant messages (outside chat_message)
+    if message["role"] == "assistant":
+        message_key = f"msg_{idx}"
+
+        # Generate TTS audio if not already generated
+        if message_key not in st.session_state.tts_audio:
+            # Determine language code for TTS
+            tts_lang = "en" if st.session_state.language == "English" else "zh-CN"
+
+            # Show warning for long messages
+            if len(message["content"]) > 500:
+                st.caption("⏳ Long message - audio generation may take a moment...")
+
+            # Generate audio with spinner feedback
+            with st.spinner("🎵 Generating audio..."):
+                audio_bytes = generate_tts_audio(message["content"], tts_lang)
+
+            if audio_bytes:
+                st.session_state.tts_audio[message_key] = audio_bytes
+            else:
+                st.error("❌ Audio generation failed. Please try again.")
+
+        # Display audio player if audio exists
+        if message_key in st.session_state.tts_audio:
+            # Add visual separation
+            st.markdown("---")
+
+            # Use columns for better layout
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                st.markdown("**🔊 Listen to response:**")
+            with col2:
+                msg_length = len(message["content"])
+                st.caption(f"{msg_length} chars")
+
+            # Full-width audio player for mobile-friendly design
+            st.audio(st.session_state.tts_audio[message_key], format="audio/mp3")
+            st.markdown("")  # Add spacing
+
 # Voice input section
 st.markdown("### 🎤 Voice Input")
+
+# Add helpful usage tip
+with st.expander("💡 How to use voice input", expanded=False):
+    st.markdown("""
+    1. Click the microphone button below
+    2. Allow microphone access when prompted
+    3. Speak clearly into your microphone
+    4. Click stop when finished
+    5. Your message will be automatically transcribed and sent to the AI
+
+    **Tip:** For best results, speak in a quiet environment
+    """)
 
 # Initialize last audio hash to track new recordings
 if "last_audio_hash" not in st.session_state:
     st.session_state.last_audio_hash = None
 
-audio_file = st.audio_input("Record your message")
+audio_file = st.audio_input("Record your message", help="Click to start recording your voice message")
 
 # Check if this is a new audio recording
 if audio_file:
@@ -217,11 +331,19 @@ else:
 
 st.markdown("---")
 
-# Text input (can type manually)
-prompt = st.text_input("Type your message here:", key="text_input")
+# Text input section
+st.markdown("### ⌨️ Text Input")
+st.info("💡 You can also type your message instead of using voice")
+
+prompt = st.text_input(
+    "Type your message here:",
+    key="text_input",
+    placeholder="Enter your message and click Send...",
+    help="Type your message and press Send to chat with the AI"
+)
 
 # Send button for typed messages
-if st.button("Send Message", type="primary") and prompt:
+if st.button("Send Message", type="primary", use_container_width=True) and prompt:
     # Add user message to chat history
     st.session_state.messages.append({"role": "user", "content": prompt})
 
@@ -246,6 +368,12 @@ if st.button("Send Message", type="primary") and prompt:
 # Footer
 st.markdown("---")
 st.markdown(
-    "<p style='text-align: center; color: gray;'>Built with Streamlit and Google Gemini API</p>",
+    """
+    <div style='text-align: center; color: gray; padding: 20px;'>
+        <p style='margin: 5px;'>🤖 <strong>Voice AI Assistant</strong></p>
+        <p style='margin: 5px; font-size: 0.9em;'>Built with Streamlit & Google Gemini API</p>
+        <p style='margin: 5px; font-size: 0.8em;'>Powered by AI • Voice-enabled • Multi-language</p>
+    </div>
+    """,
     unsafe_allow_html=True
 )
